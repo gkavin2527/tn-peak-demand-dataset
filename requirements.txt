@@ -2,3 +2,6 @@ pandas
 numpy
 requests
 holidays
+xlrd
+openpyxl
+pdfplumber

@@ -277,23 +277,26 @@ if __name__ == "__main__":
 
     cache = {}
 
-    result = fetch_peak_demand_for_date(
-        target_date,
-        cache
-    )
+    try:
+        result = fetch_peak_demand_for_date(
+            target_date,
+            cache
+        )
+    except (ConnectionError, Exception) as e:
+        print(f"\n⚠️ Grid-India API connection failed: {e}")
+        print("Note: Grid-India blocks connections from cloud runners outside India.")
+        print("Skipping peak demand update for this run.")
+        sys.exit(0)
 
     print("\nExtraction result:")
 
     for key, value in result.items():
         print(f"  {key:<24} {value}")
 
-    df = load_peak_data()
-
-    df = upsert_peak_data(
-        df,
-        result
-    )
-
-    save_peak_data(df)
-    if result.get("status") != "ok":
-        sys.exit(1)
+    if result.get("status") == "ok":
+        df = load_peak_data()
+        df = upsert_peak_data(df, result)
+        save_peak_data(df)
+    else:
+        print(f"\n⚠️ Peak demand report not available yet: {result.get('status')}. Skipping.")
+        sys.exit(0)

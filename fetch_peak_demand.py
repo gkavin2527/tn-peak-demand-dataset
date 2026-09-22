@@ -49,6 +49,9 @@ HEADERS = {
     ),
 }
 
+_PROXY = os.getenv("INDIAN_PROXY")
+PROXIES = {"http": _PROXY, "https": _PROXY} if _PROXY else None
+
 
 # ---------------------------------------------------------
 # FISCAL YEAR
@@ -93,6 +96,7 @@ def list_reports(fiscal_year: str, month: str = "00") -> list:
                 headers=HEADERS,
                 timeout=30,
                 verify=False,
+                proxies=PROXIES,
             )
 
             resp.raise_for_status()
@@ -245,6 +249,7 @@ def download_report(record: dict, dest_dir: str = "downloads") -> str:
         },
         timeout=30,
         verify=False,   # temporary local SSL workaround
+        proxies=PROXIES,
     )
 
     resp.raise_for_status()
