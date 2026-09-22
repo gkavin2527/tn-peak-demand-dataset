@@ -122,7 +122,7 @@ jobs:
               labels: 'automation'
             });
 
-            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.name}/actions/runs/${context.runId}`;
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
 
             for (const i of open.data.filter(i => i.title === title)) {
               await github.rest.issues.createComment({
