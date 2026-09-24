@@ -3,17 +3,19 @@ Build the modelling table.
 
     python build_dataset.py
 
-Target: tn_energy_gwh - Tamil Nadu daily energy met, in GWh.
-Every feature is computable the evening before the target day.
+Target: tn_peak_demand_mw - Tamil Nadu daily peak electricity demand, in MW.
+Every feature is computable before the target day (zero data leakage).
 """
 
 import numpy as np
 import pandas as pd
 
-from config import CDD_BASE, CITIES, MASTER, RAW_DEMAND, RAW_WEATHER
+from config import (CDD_BASE, CITIES, MASTER, PEAK_TARGET, RAW_DEMAND,
+                    RAW_PEAK, RAW_WEATHER)
 
 WEIGHTS = {c["name"]: c["weight"] for c in CITIES}
-TARGET = "tn_energy_gwh"
+TARGET = PEAK_TARGET
+ENERGY_COL = "tn_energy_gwh"
 
 
 def state_weather(long: pd.DataFrame) -> pd.DataFrame:
@@ -73,53 +75,96 @@ def calendar_features(dates: pd.Series) -> pd.DataFrame:
 def add_lags(df: pd.DataFrame) -> pd.DataFrame:
     """Attach backward-looking features on a calendar-continuous index.
 
-    Shifting positionally would be wrong: the demand series is missing 13 days
-    since 2015, and after each gap a positional lag_1 quietly means "two days
-    ago" and lag_364 slides off same-day-last-year. Reindexing onto a complete
-    date range first makes every lag mean the calendar day it claims; the price
-    is a NaN beside each gap, which is the truthful answer.
+    Shifting positionally would be wrong: missing days in the series would cause
+    positional lag_1 to quietly shift 2+ days ago. Reindexing onto a complete
+    date range first guarantees every lag represents the exact calendar day it claims.
+    Forward-filling (limit=2) handles isolated 1-2 day calendar blips cleanly.
     """
     span = pd.date_range(df["date"].min(), df["date"].max(), freq="D")
     full = df.set_index("date").reindex(span)
 
+    # 1. Target Autoregressive features (Peak Demand in MW)
     y = full[TARGET]
     for lag in (1, 2, 3, 7, 14, 364):
-        full[f"lag_{lag}"] = y.shift(lag)
-    for win in (7, 30):
-        full[f"roll_mean_{win}"] = y.shift(1).rolling(win).mean()
-        full[f"roll_std_{win}"] = y.shift(1).rolling(win).std()
+        full[f"peak_lag_{lag}"] = y.shift(lag).ffill(limit=2)
+    for win, min_p in ((7, 3), (30, 14)):
+        full[f"peak_roll_mean_{win}"] = y.shift(1).rolling(win, min_periods=min_p).mean()
+        full[f"peak_roll_std_{win}"] = y.shift(1).rolling(win, min_periods=min_p).std().fillna(0.0)
 
-    full["lag_1_diff"] = full["lag_1"] - full["lag_2"]
-    full["lag_1_vs_week"] = full["lag_1"] - full["lag_7"]
+    full["peak_lag_1_diff"] = full["peak_lag_1"] - full["peak_lag_2"]
+    full["peak_lag_1_vs_week"] = full["peak_lag_1"] - full["peak_lag_7"]
 
+    # 2. Daily Energy Consumption features (tn_energy_gwh)
+    if ENERGY_COL in full.columns:
+        e = full[ENERGY_COL]
+        for lag in (1, 2, 7, 14):
+            full[f"energy_lag_{lag}"] = e.shift(lag).ffill(limit=2)
+        for win, min_p in ((7, 3), (30, 14)):
+            full[f"energy_roll_mean_{win}"] = e.shift(1).rolling(win, min_periods=min_p).mean()
+            full[f"energy_roll_std_{win}"] = e.shift(1).rolling(win, min_periods=min_p).std().fillna(0.0)
+
+    # 3. Weather lags
     for col in ("cdd", "cdd_max", "thi"):
-        full[f"{col}_lag1"] = full[col].shift(1)
+        if col in full.columns:
+            full[f"{col}_lag1"] = full[col].shift(1).ffill(limit=2)
 
-    # regional context is only known with a lag, same as the target
+    # 4. Regional context lags
     for col in ("sr_max_demand_mw", "sr_wind_gwh", "sr_solar_gwh", "sr_peak_shortage_mw"):
         if col in full.columns:
-            full[f"{col}_lag1"] = full[col].shift(1)
+            full[f"{col}_lag1"] = full[col].shift(1).ffill(limit=2)
 
-    # drop the filler rows again - we only model days we actually observed
+    # Re-filter back to the observed rows
     return (full.loc[pd.DatetimeIndex(df["date"])]
                 .rename_axis("date").reset_index())
 
 
 def build() -> pd.DataFrame:
+    # 1. Load peak demand
+    peak = pd.read_csv(RAW_PEAK, parse_dates=["date"])
+    peak_cols = [c for c in ["date", TARGET, "tn_shortage_at_peak_mw"] if c in peak.columns]
+    peak = (peak[peak_cols]
+            .dropna(subset=["date", TARGET])
+            .drop_duplicates(subset="date", keep="last")
+            .sort_values("date"))
+
+    # 2. Load daily energy demand & weather
     demand = pd.read_csv(RAW_DEMAND, parse_dates=["date"])
+    # Historically backfill regional metrics before tracking began:
+    # Utility solar in Southern Region was negligible/zero prior to Sept 2016
+    if "sr_solar_gwh" in demand.columns:
+        demand["sr_solar_gwh"] = demand["sr_solar_gwh"].fillna(0.0)
+    # Peak MW was recorded as Demand Met prior to April 2017
+    if "sr_max_demand_mw" in demand.columns and "sr_demand_met_mw" in demand.columns:
+        demand["sr_max_demand_mw"] = demand["sr_max_demand_mw"].fillna(demand["sr_demand_met_mw"])
+
     weather = state_weather(pd.read_csv(RAW_WEATHER))
 
-    df = demand.merge(weather, on="date", how="inner").sort_values("date")
+    # 3. Merge peak demand, energy demand, weather, and calendar features
+    df = (peak.merge(demand, on="date", how="inner")
+              .merge(weather, on="date", how="inner")
+              .sort_values("date"))
     df = df.merge(calendar_features(df["date"]), on="date", how="left")
+
+    # Clean non-holiday string labels and default 0 MW shortage
+    df["holiday_name"] = df["holiday_name"].fillna("None").replace("", "None")
+    df["tn_shortage_at_peak_mw"] = df["tn_shortage_at_peak_mw"].fillna(0.0)
+
     df = add_lags(df).reset_index(drop=True)
 
-    # drop same-day regional columns: they are not published before the target
-    # day, so keeping them would leak
+    # 4. Drop leaky same-day regional columns (published day after target)
     leaky = [c for c in ("sr_max_demand_mw", "sr_demand_met_mw", "sr_peak_shortage_mw",
                          "sr_energy_gwh", "sr_wind_gwh", "sr_solar_gwh",
                          "india_energy_gwh", "kerala_energy_gwh",
                          "karnataka_energy_gwh", "ap_energy_gwh") if c in df.columns]
     df = df.drop(columns=leaky)
+
+    # 5. Order columns cleanly: target first, followed by context, weather, calendar, and lags
+    front = ["date", TARGET]
+    for c in ["tn_shortage_at_peak_mw", ENERGY_COL]:
+        if c in df.columns and c not in front:
+            front.append(c)
+    other = [c for c in df.columns if c not in front]
+    df = df[front + other]
 
     df.to_csv(MASTER, index=False)
     return df
@@ -135,23 +180,23 @@ def report(df: pd.DataFrame):
     print(f"missing days  {len(gaps)}")
 
     y = df[TARGET]
-    print(f"target GWh    min {y.min():,.0f}  mean {y.mean():,.0f}  max {y.max():,.0f}")
+    print(f"target MW     min {y.min():,.0f}  mean {y.mean():,.0f}  max {y.max():,.0f}")
 
-    keys = [c for c in ("cdd", "cdd_max", "thi", "t_max", "lag_1", "lag_7",
-                        "roll_mean_7", "trend") if c in df.columns]
+    keys = [c for c in ("cdd", "cdd_max", "thi", "t_max", "peak_lag_1", "peak_lag_7",
+                        "peak_roll_mean_7", "energy_lag_1", "trend") if c in df.columns]
     print("\ncorrelation with target:")
     print(df[[TARGET] + keys].corr()[TARGET].drop(TARGET).round(3).to_string())
 
     print("\nmean target by day type:")
-    print(f"  working day  {y[(df.is_weekend == 0) & (df.is_holiday == 0)].mean():,.1f}")
-    print(f"  weekend      {y[df.is_weekend == 1].mean():,.1f}")
-    print(f"  holiday      {y[df.is_holiday == 1].mean():,.1f}")
-    print(f"  Pongal week  {y[df.pongal_window == 1].mean():,.1f}")
+    print(f"  working day  {y[(df.is_weekend == 0) & (df.is_holiday == 0)].mean():,.1f} MW")
+    print(f"  weekend      {y[df.is_weekend == 1].mean():,.1f} MW")
+    print(f"  holiday      {y[df.is_holiday == 1].mean():,.1f} MW")
+    print(f"  Pongal week  {y[df.pongal_window == 1].mean():,.1f} MW")
 
     nulls = df.isna().sum()
     nulls = nulls[nulls > 0]
     if len(nulls):
-        print("\nnulls (should be head-only, matching lag windows):")
+        print("\nnulls (head-only, matching lag windows):")
         print(nulls.to_string())
 
 

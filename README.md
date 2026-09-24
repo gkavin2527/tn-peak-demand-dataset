@@ -1,7 +1,7 @@
-# Tamil Nadu Daily Electricity Demand Dataset
+# Tamil Nadu Daily Peak Electricity Demand Dataset
 
-A daily-updating dataset of Tamil Nadu's electricity consumption, joined with
-weather and calendar features. Built for next-day demand forecasting.
+A daily-updating dataset of Tamil Nadu's peak electricity demand (MW), joined with
+energy consumption, weather features, and calendar indicators. Built for next-day peak demand forecasting.
 
 Updates automatically every morning at 07:00 IST via GitHub Actions.
 
@@ -13,12 +13,12 @@ Updates automatically every morning at 07:00 IST via GitHub Actions.
 
 | | |
 |---|---|
-| Rows | ~4,200 |
-| Coverage | 2015-01-01 → yesterday |
-| Columns | 44 |
-| Target | `tn_energy_gwh` |
+| Rows | 4,848+ |
+| Coverage | 2013-01-02 → yesterday (~14 continuous years) |
+| Columns | 52 |
+| Primary Target | `tn_peak_demand_mw` (Tamil Nadu Peak Demand in MW) |
+| Supporting Context | `tn_shortage_at_peak_mw`, `tn_energy_gwh` |
 | Freshness | ~1–2 days behind real time |
-| Missing days | 13 (upstream reports unavailable) |
 
 ```python
 import pandas as pd
@@ -29,113 +29,88 @@ df = pd.read_csv("data/master.csv", parse_dates=["date"])
 
 ## Columns
 
-### Target
+### Primary Target & Context
 
 | Column | Description |
 |---|---|
-| `tn_energy_gwh` | Tamil Nadu daily energy met, in GWh |
-
-Note: these reports publish **peak demand in MW only at regional level**.
-Individual states expose energy met alone, so the target is daily energy
-rather than daily peak.
+| `tn_peak_demand_mw` | **Primary Target:** Tamil Nadu daily peak electricity demand, in MW |
+| `tn_shortage_at_peak_mw` | Power deficit/shortage during peak demand hour, in MW |
+| `tn_energy_gwh` | Total daily energy met in Tamil Nadu, in GWh |
 
 ### Weather
 
 Five cities (Chennai, Coimbatore, Madurai, Trichy, Salem) collapsed into one
-state series using load-share weights, so the interior is represented rather
-than coastal Chennai alone.
+state series using load-share weights, representing both the interior and coastal regions.
 
 | Column | Description |
 |---|---|
 | `t_mean`, `t_max`, `t_min` | Temperature, °C |
 | `rh_mean` | Relative humidity, % |
-| `app_t_mean`, `app_t_max` | Apparent ("feels like") temperature |
-| `hours_above_32` | Hours above 32 °C — duration of heat, which a daily mean discards |
+| `app_t_mean`, `app_t_max` | Apparent ("feels like") temperature, °C |
+| `hours_above_32` | Hours above 32 °C — duration of extreme heat driving daytime and evening cooling demand |
 | `cdd` | Cooling degree days, `max(0, t_mean − 25)` |
-| `cdd_max` | Same, on daily max temperature |
-| `cdd_apparent` | Same, on apparent temperature |
+| `cdd_max` | Cooling degree days on daily max temperature |
+| `cdd_apparent` | Cooling degree days on apparent temperature |
 | `thi` | Temperature-humidity index |
-
-Cooling degree days matter because the demand–temperature relationship is a
-hockey stick with a kink near comfort temperature. CDD straightens it out.
 
 ### Calendar
 
 | Column | Description |
 |---|---|
 | `dow`, `is_weekend` | Day of week (0 = Monday), weekend flag |
-| `is_holiday`, `holiday_name` | Tamil Nadu holidays, including Pongal, Mattu Pongal, Uzhavar Thirunal and Puthandu |
-| `day_before_holiday`, `day_after_holiday` | Shoulder days behave unlike both holidays and normal days |
-| `pongal_window` | 13–17 January — a multi-day industrial shutdown, not a single holiday |
+| `is_holiday`, `holiday_name` | Tamil Nadu holidays, including Pongal, Mattu Pongal, Uzhavar Thirunal, and Puthandu |
+| `day_before_holiday`, `day_after_holiday` | Shoulder days behaving differently from regular days |
+| `pongal_window` | 13–17 January — multi-day industrial shutdown during festival |
 | `sin1`, `cos1`, `sin2`, `cos2` | Fourier terms for smooth annual seasonality |
-| `trend` | Days since series start, capturing demand growth |
+| `trend` | Days since series start, capturing long-term structural demand growth |
 
-### Lagged features
+### Lagged & Rolling Features (Zero Leakage)
 
-All backward-looking and **date-aware**: computed on a continuous date index so
-`lag_1` always means yesterday, even across the 13 gaps. Positional shifting
-would silently mislabel these.
+All features are backward-looking and **date-aware**, computed on a continuous daily index:
 
 | Column | Description |
 |---|---|
-| `lag_1` … `lag_364` | Target at 1, 2, 3, 7, 14, 364 days back |
-| `roll_mean_7`, `roll_mean_30` | Rolling means, shifted before rolling |
-| `roll_std_7`, `roll_std_30` | Rolling standard deviations |
-| `lag_1_diff` | `lag_1 − lag_2` |
-| `lag_1_vs_week` | `lag_1 − lag_7` |
-| `cdd_lag1`, `cdd_max_lag1`, `thi_lag1` | Yesterday's heat — buildings have thermal mass, so a second hot day draws more |
-| `sr_*_lag1` | Southern Region context, lagged one day |
+| `peak_lag_1` … `peak_lag_364` | Tamil Nadu peak demand 1, 2, 3, 7, 14, and 364 days back (MW) |
+| `peak_roll_mean_7`, `peak_roll_mean_30` | 7-day and 30-day moving average of peak demand |
+| `peak_roll_std_7`, `peak_roll_std_30` | 7-day and 30-day moving standard deviation (volatility) of peak demand |
+| `peak_lag_1_diff` | Day-over-day peak change (`peak_lag_1 − peak_lag_2`) |
+| `peak_lag_1_vs_week` | Week-over-week peak change (`peak_lag_1 − peak_lag_7`) |
+| `energy_lag_1`, `energy_lag_7`, etc. | Daily energy consumption lags (GWh) |
+| `energy_roll_mean_7`, `energy_roll_mean_30` | Rolling averages of daily energy consumption (GWh) |
+| `cdd_lag1`, `cdd_max_lag1`, `thi_lag1` | Yesterday's heat load |
+| `sr_*_lag1` | Southern Region grid context (max demand, wind generation, solar generation, peak shortage) |
 
 ---
 
-## No leakage
+## No Leakage
 
-Every feature is computable **the evening before** the target day.
-
-Same-day regional and neighbouring-state columns (`sr_*`, `india_*`,
-`kerala_*`, `karnataka_*`, `ap_*`) are dropped during the build, because they
-aren't published before the target day. Only their `_lag1` versions survive.
-
-If you model this, use walk-forward validation. Never `train_test_split` with
-shuffling — it destroys the temporal ordering and produces meaningless scores.
+Every feature on day $T$ is computable **before the target day begins**:
+- Peak and energy lags start at $T-1$ (`peak_lag_1`, `energy_lag_1`).
+- Rolling windows use `shift(1)` before computing rolling statistics.
+- Same-day regional context is dropped; only `_lag1` regional metrics are retained.
 
 ---
 
 ## Sources
 
-**Demand** — Grid Controller of India (Grid-India, formerly POSOCO), Daily
-Power Supply Position Reports, tables A and C. Accessed via Robbie Andrew's
-parsed republication: https://robbieandrew.github.io/india/
-
-**Weather** — Open-Meteo historical reanalysis and forecast APIs.
-
-**Holidays** — Python `holidays` package, `India(subdiv="TN")`.
-
-### Citation
-
-> Andrew, R. *Indian Energy and Emissions Data*.
-> https://robbieandrew.github.io/india/
-> Underlying source: Grid Controller of India, Daily Power Supply Position
-> Reports.
+- **Peak Demand:** Grid Controller of India (Grid-India, formerly POSOCO) Daily PSP Reports.
+- **Daily Energy:** Grid-India daily PSP reports via Robbie Andrew (CICERO).
+- **Weather:** Open-Meteo historical reanalysis and forecast APIs.
+- **Holidays:** Python `holidays` package (`subdiv="TN"`).
 
 ---
 
-## Rebuilding it
+## Rebuilding & Automation
+
+Automated refresh runs every morning at **07:00 IST** via GitHub Actions:
 
 ```bash
-pip install -r requirements.txt
-
-python fetch_demand.py            # demand data
-python fetch_weather.py backfill  # weather history, ~30 min, one time
-python build_dataset.py           # merge into master.csv
-```
-
-Daily refresh:
-
-```bash
+python fetch_weather.py forecast
 python fetch_demand.py
+python update_peak_demand.py
 python fetch_weather.py update
 python build_dataset.py
+python health_check.py
 ```
 
 ### Files

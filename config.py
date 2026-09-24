@@ -14,8 +14,11 @@ CACHE.mkdir(parents=True, exist_ok=True)
 RAW_POSOCO = DATA / "POSOCO_data.csv"      # cached full download
 RAW_DEMAND = DATA / "demand_daily.csv"     # TN + Southern Region slice
 RAW_WEATHER = DATA / "weather_daily.csv"
+RAW_PEAK = DATA / "peak_demand.csv"        # Tamil Nadu peak demand from Grid-India
 FORECAST_LOG = DATA / "weather_forecast_log.csv"
 MASTER = DATA / "master.csv"
+
+PEAK_TARGET = "tn_peak_demand_mw"          # primary target: TN peak demand in MW
 
 # Grid India (POSOCO) daily reports, parsed and republished as a single CSV by
 # Robbie Andrew (CICERO). Updated daily. Cite both him and Grid India.
@@ -39,7 +42,7 @@ KEEP = {
     "India: EnergyMet":       "india_energy_gwh",
 }
 
-START_DATE = "2015-01-01"   # weather backfill start; demand goes back to 2013
+START_DATE = "2013-01-01"   # weather backfill start; demand goes back to 2013
 TZ = "Asia/Kolkata"
 
 CITIES = [

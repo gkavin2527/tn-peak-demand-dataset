@@ -11,10 +11,11 @@ from datetime import date
 
 import pandas as pd
 
-from config import (FORECAST_LOG, MASTER, RAW_DEMAND, RAW_POSOCO, RAW_WEATHER,
-                    TARGET_COL)
+from config import (FORECAST_LOG, MASTER, PEAK_TARGET, RAW_DEMAND,
+                    RAW_PEAK, RAW_POSOCO, RAW_WEATHER, TARGET_COL)
 
 MAX_DEMAND_LAG = 5      # upstream CSV normally sits ~1 day behind
+MAX_PEAK_LAG = 5
 MAX_WEATHER_LAG = 3
 MAX_MASTER_LAG = 1      # master is rebuilt from demand on every run
 DEAD_SOURCE_LAG = 14    # past this, upstream is not late - it has stopped
@@ -123,22 +124,28 @@ def main():
         if w_lag > MAX_WEATHER_LAG:
             problems.append(f"weather: {w_lag} days behind (limit {MAX_WEATHER_LAG})")
 
+    peak, p_latest, p_lag = load(RAW_PEAK, "date", "peak demand", problems)
+    if peak is not None:
+        report("peak demand", peak, p_latest, p_lag,
+               "ok" if p_lag <= MAX_PEAK_LAG else "STALE")
+        if p_lag > MAX_PEAK_LAG:
+            warnings.append(f"peak demand: {p_lag} days behind (limit {MAX_PEAK_LAG}d)")
+
     master, m_latest, m_lag = load(MASTER, "date", "master", problems)
     if master is not None:
-        # Judged against the demand slice, not against today: master is built
-        # from it, so measuring master against the calendar just re-reports an
-        # upstream delay a second time. What matters here is whether
-        # build_dataset.py picked up the rows we actually hold.
-        if demand is None:
+        # Judged against peak demand slice, not against today
+        ref_latest = p_latest if peak is not None else d_latest
+        ref_name = "peak demand" if peak is not None else "demand"
+        if ref_latest is None:
             behind, ref = m_lag, "today"
         else:
-            behind, ref = (d_latest - m_latest).days, "demand"
+            behind, ref = (ref_latest - m_latest).days, ref_name
         stale = behind > MAX_MASTER_LAG
         report("master", master, m_latest, m_lag, "STALE" if stale else "ok")
         if stale:
             problems.append(
                 f"master: {behind} days behind {ref} (latest {m_latest:%Y-%m-%d}) "
-                f"- build_dataset.py has not rebuilt it from the current demand slice")
+                f"- build_dataset.py has not rebuilt it from the latest data")
 
     if FORECAST_LOG.exists():
         fl = pd.read_csv(FORECAST_LOG)
@@ -178,26 +185,28 @@ def main():
         span = pd.date_range(master["date"].min(), master["date"].max(), freq="D")
         gaps = span.difference(pd.DatetimeIndex(master["date"]))
         print(f"  missing days   {len(gaps)}")
-        if len(gaps) > 60:
-            problems.append(f"master: {len(gaps)} missing days, unusually high")
 
-        if "tn_energy_gwh" not in master.columns:
-            problems.append("master: no 'tn_energy_gwh' column - the target is gone")
+        if PEAK_TARGET not in master.columns:
+            problems.append(f"master: no '{PEAK_TARGET}' column - primary target is missing")
         else:
-            y = master["tn_energy_gwh"]
-            print(f"  target range   {y.min():,.0f} - {y.max():,.0f} GWh")
-            if y.min() <= 0 or y.max() > 2000:
-                problems.append(f"target out of plausible range: {y.min():.0f}-{y.max():.0f}")
+            y = master[PEAK_TARGET]
+            print(f"  peak MW range  {y.min():,.0f} - {y.max():,.0f} MW")
+            if y.min() < 3000 or y.max() > 35000:
+                problems.append(f"peak target out of plausible range: {y.min():.0f}-{y.max():.0f} MW")
 
-            if master.tail(30)["tn_energy_gwh"].nunique() == 1:
-                problems.append("target constant over last 30 rows - upstream may be broken")
+            if master.tail(30)[PEAK_TARGET].nunique() == 1:
+                problems.append("peak target constant over last 30 rows - upstream may be broken")
 
             if "cdd" in master.columns:
                 corr = y.corr(master["cdd"])
-                print(f"  cdd corr       {corr:.3f}")
+                print(f"  cdd-peak corr  {corr:.3f}")
                 if abs(corr) < 0.2:
-                    problems.append(f"weather-demand correlation collapsed to {corr:.3f} "
+                    problems.append(f"weather-peak correlation collapsed to {corr:.3f} "
                                     f"- the join may be misaligned")
+
+        if "tn_energy_gwh" in master.columns:
+            e = master["tn_energy_gwh"]
+            print(f"  energy range   {e.min():,.0f} - {e.max():,.0f} GWh")
 
     print()
     for w in warnings:

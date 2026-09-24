@@ -15,7 +15,7 @@ The script:
 
 import os
 import sys
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 
@@ -259,12 +259,23 @@ def save_peak_data(df):
 
 if __name__ == "__main__":
 
+    df = load_peak_data()
+
     # If a date is supplied, use it.
-    # Otherwise, automatically use yesterday.
+    # Otherwise, automatically fetch all missing dates up to yesterday (up to 7 days).
     if len(sys.argv) == 2:
-        target_date = date.fromisoformat(sys.argv[1])
+        target_dates = [date.fromisoformat(sys.argv[1])]
     elif len(sys.argv) == 1:
-        target_date = date.today() - pd.Timedelta(days=1)
+        yesterday = date.today() - timedelta(days=1)
+        if not df.empty and "date" in df.columns:
+            latest = pd.to_datetime(df["date"]).max().date()
+            start = max(latest + timedelta(days=1), yesterday - timedelta(days=7))
+        else:
+            start = yesterday
+        if start <= yesterday:
+            target_dates = [start + timedelta(days=i) for i in range((yesterday - start).days + 1)]
+        else:
+            target_dates = [yesterday]
     else:
         print(
             "Usage:\n"
@@ -273,30 +284,29 @@ if __name__ == "__main__":
         )
         sys.exit(1)
 
-    print(f"\nFetching peak demand for {target_date}...")
-
     cache = {}
 
-    try:
-        result = fetch_peak_demand_for_date(
-            target_date,
-            cache
-        )
-    except (ConnectionError, Exception) as e:
-        print(f"\n⚠️ Grid-India API connection failed: {e}")
-        print("Note: Grid-India blocks connections from cloud runners outside India.")
-        print("Skipping peak demand update for this run.")
-        sys.exit(0)
+    for target_date in target_dates:
+        print(f"\nFetching peak demand for {target_date}...")
 
-    print("\nExtraction result:")
+        try:
+            result = fetch_peak_demand_for_date(
+                target_date,
+                cache
+            )
+        except (ConnectionError, Exception) as e:
+            print(f"\n⚠️ Grid-India API connection failed: {e}")
+            print("Note: Grid-India blocks connections from cloud runners outside India.")
+            print("Skipping peak demand update for this run.")
+            break
 
-    for key, value in result.items():
-        print(f"  {key:<24} {value}")
+        print("\nExtraction result:")
+        for key, value in result.items():
+            print(f"  {key:<24} {value}")
 
-    if result.get("status") == "ok":
-        df = load_peak_data()
-        df = upsert_peak_data(df, result)
-        save_peak_data(df)
-    else:
-        print(f"\n⚠️ Peak demand report not available yet: {result.get('status')}. Skipping.")
-        sys.exit(0)
+        if result.get("status") == "ok":
+            df = load_peak_data()
+            df = upsert_peak_data(df, result)
+            save_peak_data(df)
+        else:
+            print(f"\n⚠️ Peak demand report not available yet: {result.get('status')}. Skipping.")
