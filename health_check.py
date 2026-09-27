@@ -133,9 +133,17 @@ def main():
 
     master, m_latest, m_lag = load(MASTER, "date", "master", problems)
     if master is not None:
-        # Judged against peak demand slice, not against today
-        ref_latest = p_latest if peak is not None else d_latest
-        ref_name = "peak demand" if peak is not None else "demand"
+        # Judged against available inputs (peak demand and weather), not against today
+        inputs = [("peak demand", p_latest)]
+        if weather is not None:
+            inputs.append(("weather", w_latest))
+        valid_inputs = [(name, dt) for name, dt in inputs if dt is not None]
+        if valid_inputs:
+            ref_name, ref_latest = min(valid_inputs, key=lambda x: x[1])
+        elif d_latest is not None:
+            ref_name, ref_latest = "demand", d_latest
+        else:
+            ref_name, ref_latest = "today", None
         if ref_latest is None:
             behind, ref = m_lag, "today"
         else:

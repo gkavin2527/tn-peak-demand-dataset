@@ -121,7 +121,7 @@ def add_lags(df: pd.DataFrame) -> pd.DataFrame:
 def build() -> pd.DataFrame:
     # 1. Load peak demand
     peak = pd.read_csv(RAW_PEAK, parse_dates=["date"])
-    peak_cols = [c for c in ["date", TARGET, "tn_shortage_at_peak_mw"] if c in peak.columns]
+    peak_cols = [c for c in ["date", TARGET, "tn_shortage_at_peak_mw", "tn_energy_met_mu"] if c in peak.columns]
     peak = (peak[peak_cols]
             .dropna(subset=["date", TARGET])
             .drop_duplicates(subset="date", keep="last")
@@ -140,9 +140,19 @@ def build() -> pd.DataFrame:
     weather = state_weather(pd.read_csv(RAW_WEATHER))
 
     # 3. Merge peak demand, energy demand, weather, and calendar features
-    df = (peak.merge(demand, on="date", how="inner")
+    df = (peak.merge(demand, on="date", how="left")
               .merge(weather, on="date", how="inner")
               .sort_values("date"))
+
+    # If energy demand slice is lagging upstream, backfill from Grid-India peak report
+    if "tn_energy_met_mu" in df.columns:
+        if ENERGY_COL in df.columns:
+            df[ENERGY_COL] = df[ENERGY_COL].fillna(df["tn_energy_met_mu"])
+        else:
+            df[ENERGY_COL] = df["tn_energy_met_mu"]
+        df = df.drop(columns=["tn_energy_met_mu"])
+
+    df = df.dropna(subset=[ENERGY_COL])
     df = df.merge(calendar_features(df["date"]), on="date", how="left")
 
     # Clean non-holiday string labels and default 0 MW shortage
